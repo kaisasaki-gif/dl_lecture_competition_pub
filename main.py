@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Dict, Any
 import os
 import time
-
+import torch.nn.functional as F
 
 class RepresentationType(Enum):
     VOXEL = auto()
@@ -27,14 +27,21 @@ def set_seed(seed):
     torch.backends.cudnn.benchmark = False
     np.random.seed(seed)
 
-def compute_epe_error(pred_flow: torch.Tensor, gt_flow: torch.Tensor):
+def compute_epe_error(pred_flows: torch.Tensor, gt_flow: torch.Tensor):
     '''
     end-point-error (ground truthと予測値の二乗誤差)を計算
     pred_flow: torch.Tensor, Shape: torch.Size([B, 2, 480, 640]) => 予測したオプティカルフローデータ
     gt_flow: torch.Tensor, Shape: torch.Size([B, 2, 480, 640]) => 正解のオプティカルフローデータ
     '''
-    epe = torch.mean(torch.mean(torch.norm(pred_flow - gt_flow, p=2, dim=1), dim=(1, 2)), dim=0)
-    return epe
+    # epe = torch.mean(torch.mean(torch.norm(pred_flow - gt_flow, p=2, dim=1), dim=(1, 2)), dim=0)
+    # return epe
+    total_loss = 0
+    scales = [1.0, 0.5, 0.25]  # 各スケールの重み
+    for i, pred_flow in enumerate(pred_flows):
+        scaled_gt_flow = F.interpolate(gt_flow, size=pred_flow.shape[-2:], mode='bilinear', align_corners=False)
+        epe = torch.mean(torch.norm(pred_flow - scaled_gt_flow, p=2, dim=1))
+        total_loss += epe
+    return total_loss
 
 def save_optical_flow_to_npy(flow: torch.Tensor, file_name: str):
     '''
@@ -127,8 +134,8 @@ def main(args: DictConfig):
             batch: Dict[str, Any]
             event_image = batch["event_volume"].to(device) # [B, 4, 480, 640]
             ground_truth_flow = batch["flow_gt"].to(device) # [B, 2, 480, 640]
-            flow = model(event_image) # [B, 2, 480, 640]
-            loss: torch.Tensor = compute_epe_error(flow, ground_truth_flow)
+            pred_flows = model(event_image) # 各スケールの予測結果を取得
+            loss: torch.Tensor = compute_epe_error(pred_flows, ground_truth_flow)
             print(f"batch {i} loss: {loss.item()}")
             optimizer.zero_grad()
             loss.backward()
@@ -158,6 +165,7 @@ def main(args: DictConfig):
             batch: Dict[str, Any]
             event_image = batch["event_volume"].to(device)
             batch_flow = model(event_image) # [1, 2, 480, 640]
+            batch_flow = batch_flows[0]
             flow = torch.cat((flow, batch_flow), dim=0)  # [N, 2, 480, 640]
         print("test done")
     # ------------------
